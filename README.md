@@ -160,6 +160,12 @@ Run it locally:
 
 The script is read-only. It does not edit files, restart services, reload web servers, or install packages.
 
+Or if you're the kind of person that drives without a seatbelt:
+
+```base
+curl https://raw.githubusercontent.com/singe/pqc4free/refs/heads/main/pqc4free.sh|sh
+```
+
 ---
 
 ## Basic usage
