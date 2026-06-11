@@ -181,6 +181,82 @@ Show help:
 
 ---
 
+## Container test matrix
+
+This repository now includes two parametrized Dockerfiles plus a matrix runner:
+
+- `Dockerfile.nginx`
+- `Dockerfile.apache`
+- `scripts/test-matrix.sh`
+
+The Dockerfiles accept:
+
+- `BASE_IMAGE`
+- `BASE_FAMILY`
+- `VARIANT` (`pqc` or `vanilla`)
+
+The matrix runner builds, starts, and validates:
+
+- nginx on Debian, Ubuntu, Alpine, and Red Hat UBI
+- Apache on Debian, Ubuntu, Alpine, and Red Hat UBI
+- both a `pqc` image and a `vanilla` image for each combination
+
+Run the full matrix:
+
+```bash
+bash scripts/test-matrix.sh
+```
+
+The script verifies, for each container:
+
+- image build succeeds;
+- the container stays up;
+- `https://127.0.0.1:<port>/` serves the expected marker page;
+- the live TLS 1.3 handshake completes;
+- `pqc4free.sh --json` reports the expected readiness state.
+
+### Confirmed matrix
+
+As tested in this repository, the following combinations all built and served correctly:
+
+| Server | Base OS | PQC image | Vanilla image |
+|---|---|---|---|
+| nginx | Debian 13 (`debian:trixie`) | yes | yes |
+| nginx | Ubuntu 26.04 (`ubuntu:26.04`) | yes | yes |
+| nginx | Alpine 3.22 (`alpine:3.22`) | yes | yes |
+| nginx | Red Hat UBI 10 (`registry.access.redhat.com/ubi10/ubi`) | yes | yes |
+| Apache | Debian 13 (`debian:trixie`) | yes | yes |
+| Apache | Ubuntu 26.04 (`ubuntu:26.04`) | yes | yes |
+| Apache | Alpine 3.22 (`alpine:3.22`) | yes | yes |
+| Apache | Red Hat UBI 10 (`registry.access.redhat.com/ubi10/ubi`) | yes | yes |
+
+### Important observation from live testing
+
+On all tested OpenSSL 3.5+ bases, the live TLS 1.3 handshake negotiated:
+
+```text
+X25519MLKEM768
+```
+
+for both the `pqc` and `vanilla` images when the client offered:
+
+```text
+X25519MLKEM768:X25519
+```
+
+That means:
+
+- the `pqc` images prove that explicit web-server `Groups` directives work;
+- the `vanilla` images prove that modern OpenSSL may already negotiate the hybrid group by default;
+- absence of `ssl_conf_command Groups ...` or `SSLOpenSSLConfCmd Groups ...` does **not** necessarily mean the live handshake will be classical-only.
+
+The practical difference is policy explicitness:
+
+- `pqc` images pin the server configuration explicitly;
+- `vanilla` images rely on the OpenSSL/web-server defaults of that platform.
+
+---
+
 ## Options
 
 ### `--json`

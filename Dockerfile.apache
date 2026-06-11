@@ -1,0 +1,16 @@
+ARG BASE_IMAGE=debian:trixie
+FROM ${BASE_IMAGE}
+
+ARG BASE_FAMILY=debian
+ARG VARIANT=pqc
+
+COPY docker/common/generate-cert.sh /usr/local/bin/generate-cert.sh
+COPY docker/apache/setup.sh /usr/local/bin/setup-apache.sh
+COPY docker/apache/start.sh /usr/local/bin/start-apache.sh
+
+RUN chmod +x /usr/local/bin/generate-cert.sh /usr/local/bin/setup-apache.sh /usr/local/bin/start-apache.sh \
+ && /usr/local/bin/setup-apache.sh "${BASE_FAMILY}" "${VARIANT}"
+
+EXPOSE 80 443
+
+CMD ["/usr/local/bin/start-apache.sh"]

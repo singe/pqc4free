@@ -46,6 +46,7 @@ APACHE_INSTALLED=0
 APACHE_RUNNING=0
 APACHE_BINARY=""
 APACHE_CTL=""
+APACHE_MOD_SSL=""
 APACHE_VERSION=""
 APACHE_OPENSSL=""
 APACHE_PQC_STATUS="unknown"
@@ -223,7 +224,26 @@ service_running() {
     fi
   fi
 
-  pgrep -x "$svc" >/dev/null 2>&1
+  if have_cmd pgrep; then
+    pgrep -x "$svc" >/dev/null 2>&1 && return 0
+  fi
+
+  if have_cmd pidof; then
+    pidof "$svc" >/dev/null 2>&1 && return 0
+  fi
+
+  if have_cmd ps; then
+    ps -eo comm= 2>/dev/null | grep -qx "$svc" && return 0
+  fi
+
+  for proc_comm in /proc/[0-9]*/comm; do
+    [ -r "$proc_comm" ] || continue
+    if [ "$(cat "$proc_comm" 2>/dev/null)" = "$svc" ]; then
+      return 0
+    fi
+  done
+
+  return 1
 }
 
 detect_os() {
@@ -253,10 +273,10 @@ openssl_cli_supports_pqc() {
 
   # Correct OpenSSL 3.x syntax.
   openssl list -tls-groups -tls1_3 2>/dev/null \
-    | grep -Eqi "(^|[[:space:]])${PQC_GROUP_PRIMARY}($|[[:space:]])" && return 0
+    | grep -Fqi "${PQC_GROUP_PRIMARY}" && return 0
 
   openssl list -all-tls-groups -tls1_3 2>/dev/null \
-    | grep -Eqi "(^|[[:space:]])${PQC_GROUP_PRIMARY}($|[[:space:]])" && return 0
+    | grep -Fqi "${PQC_GROUP_PRIMARY}" && return 0
 
   # Weaker evidence: the provider has ML-KEM, but TLS group listing did not prove
   # the specific hybrid TLS group.
@@ -343,6 +363,20 @@ apache_ctl() {
   fi
 }
 
+find_apache_mod_ssl_module() {
+  for p in \
+    /usr/lib/apache2/modules/mod_ssl.so \
+    /usr/lib64/httpd/modules/mod_ssl.so \
+    /usr/lib/httpd/modules/mod_ssl.so \
+    /etc/httpd/modules/mod_ssl.so \
+    /usr/local/apache2/modules/mod_ssl.so
+  do
+    [ -r "$p" ] && printf '%s\n' "$p" && return 0
+  done
+
+  return 1
+}
+
 nginx_full_config_to_file() {
   out="$1"
 
@@ -388,6 +422,30 @@ apache_modules_to_file() {
 
   if [ "${EUID:-$(id -u)}" -ne 0 ] && have_cmd sudo; then
     sudo -n "$ctl" -M >"$out" 2>&1 && return 0
+  fi
+
+  return 1
+}
+
+probe_apache_accepts_pqc_groups() {
+  cmd=""
+
+  if [ -d /etc/httpd ] && [ -n "$APACHE_BINARY" ]; then
+    cmd="$APACHE_BINARY"
+  elif [ -n "$APACHE_CTL" ]; then
+    cmd="$APACHE_CTL"
+  elif [ -n "$APACHE_BINARY" ]; then
+    cmd="$APACHE_BINARY"
+  else
+    return 3
+  fi
+
+  if "$cmd" -t -c "SSLOpenSSLConfCmd Groups $PQC_GROUPS" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  if [ "${EUID:-$(id -u)}" -ne 0 ] && have_cmd sudo; then
+    sudo -n "$cmd" -t -c "SSLOpenSSLConfCmd Groups $PQC_GROUPS" >/dev/null 2>&1 && return 0
   fi
 
   return 1
@@ -584,6 +642,7 @@ scan_nginx_config() {
 assess_apache_binary() {
   APACHE_BINARY="$(apache_bin)"
   APACHE_CTL="$(apache_ctl)"
+  APACHE_MOD_SSL=""
 
   if [ -z "$APACHE_BINARY" ] && [ -z "$APACHE_CTL" ]; then
     APACHE_INSTALLED=0
@@ -614,13 +673,20 @@ assess_apache_binary() {
     APACHE_PQC_REASON="Apache -V reports OpenSSL 3.5+; mod_ssl linkage should still be validated"
   else
     libssl=""
-    if [ -n "$APACHE_BINARY" ]; then
+    APACHE_MOD_SSL="$(find_apache_mod_ssl_module || true)"
+    if [ -n "$APACHE_MOD_SSL" ]; then
+      libssl="$(find_linked_libssl "$APACHE_MOD_SSL" || true)"
+    elif [ -n "$APACHE_BINARY" ]; then
       libssl="$(find_linked_libssl "$APACHE_BINARY" || true)"
     fi
 
     if [ -n "$libssl" ] && libssl_supports_pqc_by_strings "$libssl"; then
       APACHE_PQC_STATUS="likely"
-      APACHE_PQC_REASON="Apache linked libssl appears to contain ${PQC_GROUP_PRIMARY}; mod_ssl should still be validated"
+      if [ -n "$APACHE_MOD_SSL" ]; then
+        APACHE_PQC_REASON="Apache mod_ssl links to a libssl that appears to contain ${PQC_GROUP_PRIMARY}"
+      else
+        APACHE_PQC_REASON="Apache linked libssl appears to contain ${PQC_GROUP_PRIMARY}; mod_ssl should still be validated"
+      fi
     elif [ "$OPENSSL_CLI_PQC_STATUS" = "yes" ]; then
       APACHE_PQC_STATUS="unknown"
       APACHE_PQC_REASON="openssl CLI supports ${PQC_GROUP_PRIMARY}, but Apache/mod_ssl linkage could not be proven"
@@ -628,6 +694,11 @@ assess_apache_binary() {
       APACHE_PQC_STATUS="no"
       APACHE_PQC_REASON="Apache does not appear to be linked against OpenSSL 3.5+ or a libssl containing ${PQC_GROUP_PRIMARY}"
     fi
+  fi
+
+  if probe_apache_accepts_pqc_groups; then
+    APACHE_PQC_STATUS="likely"
+    APACHE_PQC_REASON="Apache configtest accepts SSLOpenSSLConfCmd Groups ${PQC_GROUPS}"
   fi
 }
 
