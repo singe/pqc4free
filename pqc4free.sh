@@ -546,12 +546,11 @@ assess_nginx_binary() {
     fi
   fi
 
+  # Configtest acceptance proves syntax only. It does not prove the linked
+  # OpenSSL stack can negotiate X25519MLKEM768 at runtime, so keep it out of the
+  # readiness classification.
   if probe_nginx_accepts_pqc_groups; then
     NGINX_CONFIG_TEST_PQC_STATUS="yes"
-    if [ "$NGINX_PQC_STATUS" != "yes" ]; then
-      NGINX_PQC_STATUS="likely"
-      NGINX_PQC_REASON="temporary nginx configtest accepted ssl_conf_command Groups ${PQC_GROUPS}"
-    fi
   else
     rc=$?
     if [ "$rc" -eq 3 ]; then
@@ -696,10 +695,10 @@ assess_apache_binary() {
     fi
   fi
 
-  if probe_apache_accepts_pqc_groups; then
-    APACHE_PQC_STATUS="likely"
-    APACHE_PQC_REASON="Apache configtest accepts SSLOpenSSLConfCmd Groups ${PQC_GROUPS}"
-  fi
+  # Apache configtest also validates syntax only. Keep it out of the readiness
+  # classification so a host is not marked likely-ready without runtime/library
+  # evidence.
+  probe_apache_accepts_pqc_groups >/dev/null 2>&1 || true
 }
 
 scan_apache_config() {
