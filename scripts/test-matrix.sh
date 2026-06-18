@@ -4,26 +4,52 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
 entries=(
-  "nginx|pqc|debian|debian:trixie|10443"
-  "nginx|vanilla|debian|debian:trixie|10444"
-  "nginx|pqc|ubuntu|ubuntu:24.04|10441"
-  "nginx|vanilla|ubuntu|ubuntu:24.04|10442"
-  "nginx|pqc|ubuntu|ubuntu:26.04|10445"
-  "nginx|vanilla|ubuntu|ubuntu:26.04|10446"
-  "nginx|pqc|alpine|alpine:3.22|10447"
-  "nginx|vanilla|alpine|alpine:3.22|10448"
-  "nginx|pqc|rhel|registry.access.redhat.com/ubi10/ubi|10449"
-  "nginx|vanilla|rhel|registry.access.redhat.com/ubi10/ubi|10450"
-  "apache|pqc|debian|debian:trixie|11443"
-  "apache|vanilla|debian|debian:trixie|11444"
-  "apache|pqc|ubuntu|ubuntu:24.04|11441"
-  "apache|vanilla|ubuntu|ubuntu:24.04|11442"
-  "apache|pqc|ubuntu|ubuntu:26.04|11445"
-  "apache|vanilla|ubuntu|ubuntu:26.04|11446"
-  "apache|pqc|alpine|alpine:3.22|11447"
-  "apache|vanilla|alpine|alpine:3.22|11448"
-  "apache|pqc|rhel|registry.access.redhat.com/ubi10/ubi|11449"
-  "apache|vanilla|rhel|registry.access.redhat.com/ubi10/ubi|11450"
+  # Debian: rolling/unstable, current stable, last stable.
+  "nginx|pqc|debian|debian:sid|10401"
+  "nginx|vanilla|debian|debian:sid|10402"
+  "nginx|pqc|debian|debian:trixie|10403"
+  "nginx|vanilla|debian|debian:trixie|10404"
+  "nginx|vanilla|debian|debian:bookworm|10405"
+  "apache|pqc|debian|debian:sid|11401"
+  "apache|vanilla|debian|debian:sid|11402"
+  "apache|pqc|debian|debian:trixie|11403"
+  "apache|vanilla|debian|debian:trixie|11404"
+  "apache|vanilla|debian|debian:bookworm|11405"
+
+  # Ubuntu: devel, current stable, last stable.
+  "nginx|pqc|ubuntu|ubuntu:devel|10411"
+  "nginx|vanilla|ubuntu|ubuntu:devel|10412"
+  "nginx|pqc|ubuntu|ubuntu:26.04|10413"
+  "nginx|vanilla|ubuntu|ubuntu:26.04|10414"
+  "nginx|vanilla|ubuntu|ubuntu:24.04|10415"
+  "apache|pqc|ubuntu|ubuntu:devel|11411"
+  "apache|vanilla|ubuntu|ubuntu:devel|11412"
+  "apache|pqc|ubuntu|ubuntu:26.04|11413"
+  "apache|vanilla|ubuntu|ubuntu:26.04|11414"
+  "apache|vanilla|ubuntu|ubuntu:24.04|11415"
+
+  # Alpine: edge, current stable, last stable.
+  # Use the public mirror to avoid Docker Hub rate limits during matrix runs.
+  "nginx|pqc|alpine|mirror.gcr.io/library/alpine:edge|10421"
+  "nginx|vanilla|alpine|mirror.gcr.io/library/alpine:edge|10422"
+  "nginx|pqc|alpine|mirror.gcr.io/library/alpine:3.22|10423"
+  "nginx|vanilla|alpine|mirror.gcr.io/library/alpine:3.22|10424"
+  "nginx|vanilla|alpine|mirror.gcr.io/library/alpine:3.21|10425"
+  "apache|pqc|alpine|mirror.gcr.io/library/alpine:edge|11421"
+  "apache|vanilla|alpine|mirror.gcr.io/library/alpine:edge|11422"
+  "apache|pqc|alpine|mirror.gcr.io/library/alpine:3.22|11423"
+  "apache|vanilla|alpine|mirror.gcr.io/library/alpine:3.22|11424"
+  "apache|vanilla|alpine|mirror.gcr.io/library/alpine:3.21|11425"
+
+  # RHEL/UBI: newest major, current previous major, and the one before that.
+  "nginx|pqc|rhel|registry.access.redhat.com/ubi10/ubi|10431"
+  "nginx|vanilla|rhel|registry.access.redhat.com/ubi10/ubi|10432"
+  "nginx|vanilla|rhel|registry.access.redhat.com/ubi9/ubi|10433"
+  "nginx|vanilla|rhel|registry.access.redhat.com/ubi8/ubi|10434"
+  "apache|pqc|rhel|registry.access.redhat.com/ubi10/ubi|11431"
+  "apache|vanilla|rhel|registry.access.redhat.com/ubi10/ubi|11432"
+  "apache|vanilla|rhel|registry.access.redhat.com/ubi9/ubi|11433"
+  "apache|vanilla|rhel|registry.access.redhat.com/ubi8/ubi|11434"
 )
 
 cleanup() {
@@ -95,7 +121,7 @@ check_expected_config() {
 
 run_audit() {
   local container="$1"
-  docker exec "${container}" sh -lc "/bin/sh /pqc4free.sh --json"
+  docker exec "${container}" bash /pqc4free.sh --json
 }
 
 printf 'server,variant,family,image,body,group,pqc_status,config_ok\n'

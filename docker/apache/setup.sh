@@ -11,12 +11,12 @@ install_packages() {
   case "${family}" in
     debian|ubuntu)
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y --no-install-recommends apache2 openssl ca-certificates
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends apache2 openssl ca-certificates
       rm -rf /var/lib/apt/lists/*
       ;;
     alpine)
-      apk add --no-cache apache2 apache2-ctl apache2-ssl openssl ca-certificates
+      apk add --no-cache apache2 apache2-ctl apache2-ssl openssl ca-certificates bash
       apache_cert_dir="/etc/ssl/apache2"
       apache_docroot="/var/www/localhost/htdocs"
       ;;

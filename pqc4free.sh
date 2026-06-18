@@ -39,6 +39,8 @@ NGINX_PQC_GROUPS_CONFIGURED=0
 NGINX_SSL_CONF_COMMAND_FOUND=0
 NGINX_PROTOCOLS_TLS13_FOUND=0
 NGINX_CONFIG_TEST_PQC_STATUS="unknown"
+NGINX_RUNTIME_PQC_STATUS="unknown"
+NGINX_RUNTIME_PQC_GROUP=""
 NGINX_UPGRADE_RECOMMENDED=0
 NGINX_CONFIG_CHANGE_RECOMMENDED=0
 
@@ -55,6 +57,8 @@ APACHE_TLS_SITE_FOUND=0
 APACHE_PQC_GROUPS_CONFIGURED=0
 APACHE_SSL_CONF_COMMAND_FOUND=0
 APACHE_PROTOCOLS_TLS13_FOUND=0
+APACHE_RUNTIME_PQC_STATUS="unknown"
+APACHE_RUNTIME_PQC_GROUP=""
 APACHE_UPGRADE_RECOMMENDED=0
 APACHE_CONFIG_CHANGE_RECOMMENDED=0
 
@@ -62,7 +66,6 @@ TLS_SITE_ANY=0
 UPGRADE_ANY=0
 UNKNOWN_ANY=0
 WEBSERVER_ANY=0
-READY_ANY=0
 
 TMP_FILES=""
 
@@ -175,23 +178,6 @@ json_bool() {
     1|yes|true|ready|likely) printf 'true' ;;
     *) printf 'false' ;;
   esac
-}
-
-run_maybe_sudo() {
-  if "$@" >/tmp/pqc_audit_cmd.out 2>/tmp/pqc_audit_cmd.err; then
-    cat /tmp/pqc_audit_cmd.out
-    return 0
-  fi
-
-  if [ "${EUID:-$(id -u)}" -ne 0 ] && have_cmd sudo; then
-    if sudo -n "$@" >/tmp/pqc_audit_cmd.out 2>/tmp/pqc_audit_cmd.err; then
-      cat /tmp/pqc_audit_cmd.out
-      return 0
-    fi
-  fi
-
-  cat /tmp/pqc_audit_cmd.err >&2
-  return 1
 }
 
 running_in_container() {
@@ -337,6 +323,99 @@ libssl_supports_pqc_by_strings() {
   fi
 
   return 1
+}
+
+probe_local_runtime_tls13_group() {
+  tls_site_found="$1"
+  port="$2"
+  output=""
+  group=""
+
+  [ "$tls_site_found" -eq 1 ] || return 3
+  have_cmd openssl || return 3
+
+  if ! openssl_cli_supports_pqc; then
+    return 3
+  fi
+
+  output="$(
+    openssl s_client \
+      -connect "127.0.0.1:${port}" \
+      -servername localhost \
+      -tls1_3 \
+      -groups "${PQC_GROUP_PRIMARY}:X25519" \
+      </dev/null 2>&1 || true
+  )"
+
+  group="$(
+    printf '%s\n' "$output" \
+      | sed -n \
+          -e 's/^Negotiated TLS1\.3 group: //p' \
+          -e 's/^Peer Temp Key: \([^,]*\),.*$/\1/p' \
+          -e 's/^Server Temp Key: \([^,]*\),.*$/\1/p' \
+      | head -n 1
+  )"
+
+  if [ -n "$group" ]; then
+    printf '%s' "$group"
+    if [ "$group" = "$PQC_GROUP_PRIMARY" ]; then
+      return 0
+    fi
+    return 1
+  fi
+
+  if printf '%s\n' "$output" | grep -Eq \
+    'connect:|Connection refused|handshake failure|alert|no suitable groups|tlsv1 alert|no peer certificate'
+  then
+    return 1
+  fi
+
+  return 3
+}
+
+record_runtime_probe_result() {
+  prefix="$1"
+  rc="$2"
+  runtime_group="${3:-}"
+
+  case "$prefix" in
+    NGINX)
+      status_var="NGINX_RUNTIME_PQC_STATUS"
+      group_var="NGINX_RUNTIME_PQC_GROUP"
+      pqc_status_var="NGINX_PQC_STATUS"
+      pqc_reason_var="NGINX_PQC_REASON"
+      ;;
+    APACHE)
+      status_var="APACHE_RUNTIME_PQC_STATUS"
+      group_var="APACHE_RUNTIME_PQC_GROUP"
+      pqc_status_var="APACHE_PQC_STATUS"
+      pqc_reason_var="APACHE_PQC_REASON"
+      ;;
+    *)
+      return 3
+      ;;
+  esac
+
+  case "$rc" in
+    0)
+      group_value="${runtime_group:-$PQC_GROUP_PRIMARY}"
+      eval "$status_var=yes"
+      eval "$group_var=\$group_value"
+      eval "$pqc_status_var=yes"
+      eval "$pqc_reason_var=\"local TLS handshake negotiated \$group_value\""
+      ;;
+    1)
+      group_value="${runtime_group:-unknown}"
+      eval "$status_var=no"
+      eval "$group_var=\$group_value"
+      eval "$pqc_status_var=no"
+      eval "$pqc_reason_var=\"local TLS handshake negotiated \$group_value\""
+      ;;
+    *)
+      eval "$status_var=unknown"
+      eval "$group_var=\"\""
+      ;;
+  esac
 }
 
 nginx_bin() {
@@ -563,6 +642,7 @@ assess_nginx_binary() {
       fi
     fi
   fi
+
 }
 
 scan_nginx_config() {
@@ -636,6 +716,20 @@ scan_nginx_config() {
         && NGINX_PROTOCOLS_TLS13_FOUND=1
     fi
   fi
+
+  # Runtime proof only needs a TLS site and a local client capable of requesting
+  # the PQC group. Process-name heuristics are too brittle across distros.
+  if [ "$NGINX_TLS_SITE_FOUND" -eq 1 ] && have_cmd openssl; then
+    runtime_group=""
+    if runtime_group="$(
+      probe_local_runtime_tls13_group "$NGINX_TLS_SITE_FOUND" 443
+    )"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    record_runtime_probe_result NGINX "$rc" "$runtime_group"
+  fi
 }
 
 assess_apache_binary() {
@@ -699,6 +793,7 @@ assess_apache_binary() {
   # classification so a host is not marked likely-ready without runtime/library
   # evidence.
   probe_apache_accepts_pqc_groups >/dev/null 2>&1 || true
+
 }
 
 scan_apache_config() {
@@ -762,6 +857,21 @@ scan_apache_config() {
         | sed 's/^/  /' || true
     done
   fi
+
+  # Runtime proof only needs a TLS site and a local client capable of requesting
+  # the PQC group. Process-name heuristics are too brittle across distros.
+  if [ "$APACHE_TLS_SITE_FOUND" -eq 1 ] && have_cmd openssl; then
+    runtime_group=""
+    if runtime_group="$(
+      probe_local_runtime_tls13_group "$APACHE_TLS_SITE_FOUND" 443
+    )"; then
+      rc=0
+    else
+      rc=$?
+    fi
+    record_runtime_probe_result APACHE "$rc" "$runtime_group"
+  fi
+
 }
 
 compute_recommendations() {
@@ -785,9 +895,6 @@ compute_recommendations() {
       NGINX_CONFIG_CHANGE_RECOMMENDED=1
     fi
 
-    if [ "$NGINX_PQC_STATUS" = "yes" ] || [ "$NGINX_PQC_STATUS" = "likely" ]; then
-      READY_ANY=1
-    fi
   fi
 
   if [ "$APACHE_INSTALLED" -eq 1 ]; then
@@ -810,9 +917,6 @@ compute_recommendations() {
       APACHE_CONFIG_CHANGE_RECOMMENDED=1
     fi
 
-    if [ "$APACHE_PQC_STATUS" = "yes" ] || [ "$APACHE_PQC_STATUS" = "likely" ]; then
-      READY_ANY=1
-    fi
   fi
 }
 
@@ -829,61 +933,67 @@ print_upgrade_hint() {
 Debian/Ubuntu-style system detected.
 
 Suggested path:
+  Upgrade the packages you actually have installed; omit packages that are not present on the host.
+
   1. Check packaged versions:
        apt-cache policy openssl nginx apache2
 
   2. Try normal package upgrades first:
-       sudo apt update
-       sudo apt install --only-upgrade openssl nginx apache2
+       apt update
+       apt install --only-upgrade openssl nginx apache2
 
   3. If OpenSSL remains below 3.5 or the web server remains linked to an older libssl:
-       - upgrade to a distribution release that packages OpenSSL 3.5+; or
+       - Debian bookworm needs an upgrade to trixie or a vendor/backports repo that ships OpenSSL 3.5+; or
+       - Ubuntu 24.04 needs an upgrade to 26.04 or a vendor/backports repo that ships OpenSSL 3.5+; or
        - use a trusted vendor/backports repository that provides nginx/apache linked to OpenSSL 3.5+; or
        - use a newer container image/base OS.
-
-Do not merely install a newer openssl CLI. nginx/apache must be linked against a libssl that supports the PQC TLS group.
 EOF
+      print_next_step_hint
       ;;
     rhel:*|centos:*|fedora:*|rocky:*|almalinux:*|*:rhel*|*:fedora*)
       cat <<'EOF'
 Red Hat/Fedora-style system detected.
 
 Suggested path:
+  Upgrade the packages you actually have installed; omit packages that are not present on the host.
+
   1. Check packaged versions:
        rpm -q openssl nginx httpd
        dnf info openssl nginx httpd
 
   2. Try normal package upgrades first:
-       sudo dnf upgrade openssl nginx httpd
+       dnf upgrade openssl nginx httpd
 
      On older systems:
-       sudo yum update openssl nginx httpd
+       yum update openssl nginx httpd
 
   3. If OpenSSL remains below 3.5 or the web server remains linked to an older libssl:
-       - move to a distro release that packages OpenSSL 3.5+; or
+       - UBI 8/9 need an upgrade to UBI 10 or a vendor stream that ships OpenSSL 3.5+; or
        - use a trusted vendor stream that ships httpd/nginx linked to OpenSSL 3.5+; or
        - use a newer container base.
-
-Many enterprise releases intentionally keep OpenSSL conservative. That may require a platform or vendor-stream upgrade.
 EOF
+      print_next_step_hint
       ;;
     alpine:*|*:alpine*)
       cat <<'EOF'
 Alpine system detected.
 
 Suggested path:
+  Upgrade the packages you actually have installed; omit packages that are not present on the host.
+
   1. Check packaged versions:
        apk info -v openssl nginx apache2
 
   2. Try normal package upgrades first:
-       sudo apk update
-       sudo apk upgrade openssl nginx apache2
+       apk update
+       apk upgrade openssl nginx apache2
 
   3. If OpenSSL remains below 3.5 or the web server remains linked to an older libssl:
-       - move to a newer Alpine release; or
+       - Alpine 3.21 needs an upgrade to 3.22 or edge; or
        - use a newer container image/tag; or
        - rebuild nginx/apache against an OpenSSL 3.5+ package from a trusted repository.
 EOF
+      print_next_step_hint
       ;;
     *)
       cat <<'EOF'
@@ -895,6 +1005,7 @@ Suggested path:
   3. If linked libssl still lacks X25519MLKEM768, upgrade the distro/release or use a newer container base.
   4. Confirm the web server is linked against the new OpenSSL library.
 EOF
+      print_next_step_hint
       ;;
   esac
 }
@@ -941,6 +1052,7 @@ Example:
     }
 
 EOF
+  print_config_change_caveat
 
   if [ "$IN_CONTAINER" -eq 1 ]; then
     cat <<'EOF'
@@ -998,6 +1110,7 @@ Example:
     </VirtualHost>
 
 EOF
+  print_config_change_caveat
 
   if [ "$IN_CONTAINER" -eq 1 ]; then
     cat <<'EOF'
@@ -1046,6 +1159,24 @@ the behaviour explicit and protects against older/custom group settings.
 EOF
 }
 
+print_config_change_caveat() {
+  cat <<'EOF'
+This config change only helps when the web server is already linked against an OpenSSL/libssl that understands X25519MLKEM768.
+If the binary or library is too old, upgrade the package or distro first.
+EOF
+}
+
+print_next_step_hint() {
+  cat <<'EOF'
+Decision guide:
+  1. If your web server already has the right config but PQC still fails, the problem is the linked OpenSSL/libssl stack.
+  2. If the server package is old, upgrade the web server package and OpenSSL together from the OS/vendor repository.
+  3. If the repository version still stays below OpenSSL 3.5, move to a newer distro/release or a newer container base.
+
+Do not stop at upgrading the openssl CLI alone. nginx/apache must actually be linked against a libssl that supports X25519MLKEM768.
+EOF
+}
+
 print_human_summary() {
   hr
   say "PQC TLS KEM readiness audit for nginx/Apache"
@@ -1082,6 +1213,8 @@ print_human_summary() {
     say "  running:                 $([ "$NGINX_RUNNING" -eq 1 ] && printf yes || printf no)"
     say "  PQC binary readiness:    $NGINX_PQC_STATUS"
     say "  PQC reason:              $NGINX_PQC_REASON"
+    say "  Runtime probe:           $NGINX_RUNTIME_PQC_STATUS"
+    say "  Runtime group:           ${NGINX_RUNTIME_PQC_GROUP:-unknown}"
     say "  Groups configtest:       $NGINX_CONFIG_TEST_PQC_STATUS"
     say "  TLS site found:          $([ "$NGINX_TLS_SITE_FOUND" -eq 1 ] && printf yes || printf no)"
     say "  PQC Groups configured:   $([ "$NGINX_PQC_GROUPS_CONFIGURED" -eq 1 ] && printf yes || printf no)"
@@ -1113,6 +1246,8 @@ print_human_summary() {
     say "  running:                 $([ "$APACHE_RUNNING" -eq 1 ] && printf yes || printf no)"
     say "  PQC binary readiness:    $APACHE_PQC_STATUS"
     say "  PQC reason:              $APACHE_PQC_REASON"
+    say "  Runtime probe:           $APACHE_RUNTIME_PQC_STATUS"
+    say "  Runtime group:           ${APACHE_RUNTIME_PQC_GROUP:-unknown}"
     say "  TLS site found:          $([ "$APACHE_TLS_SITE_FOUND" -eq 1 ] && printf yes || printf no)"
     say "  PQC Groups configured:   $([ "$APACHE_PQC_GROUPS_CONFIGURED" -eq 1 ] && printf yes || printf no)"
     say "  TLSv1.3 configured:      $([ "$APACHE_PROTOCOLS_TLS13_FOUND" -eq 1 ] && printf yes || printf no)"
@@ -1168,6 +1303,8 @@ print_json() {
     "openssl": "$(json_escape "$NGINX_OPENSSL")",
     "pqc_status": "$(json_escape "$NGINX_PQC_STATUS")",
     "pqc_reason": "$(json_escape "$NGINX_PQC_REASON")",
+    "runtime_probe_status": "$(json_escape "$NGINX_RUNTIME_PQC_STATUS")",
+    "runtime_probe_group": "$(json_escape "$NGINX_RUNTIME_PQC_GROUP")",
     "configtest_accepts_pqc_groups": "$(json_escape "$NGINX_CONFIG_TEST_PQC_STATUS")",
     "tls_site_found": $(json_bool "$NGINX_TLS_SITE_FOUND"),
     "pqc_groups_configured": $(json_bool "$NGINX_PQC_GROUPS_CONFIGURED"),
@@ -1184,6 +1321,8 @@ print_json() {
     "openssl": "$(json_escape "$APACHE_OPENSSL")",
     "pqc_status": "$(json_escape "$APACHE_PQC_STATUS")",
     "pqc_reason": "$(json_escape "$APACHE_PQC_REASON")",
+    "runtime_probe_status": "$(json_escape "$APACHE_RUNTIME_PQC_STATUS")",
+    "runtime_probe_group": "$(json_escape "$APACHE_RUNTIME_PQC_GROUP")",
     "tls_site_found": $(json_bool "$APACHE_TLS_SITE_FOUND"),
     "pqc_groups_configured": $(json_bool "$APACHE_PQC_GROUPS_CONFIGURED"),
     "tls13_configured": $(json_bool "$APACHE_PROTOCOLS_TLS13_FOUND"),

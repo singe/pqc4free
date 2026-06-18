@@ -10,12 +10,12 @@ install_packages() {
   case "${family}" in
     debian|ubuntu)
       export DEBIAN_FRONTEND=noninteractive
-      apt-get update
-      apt-get install -y --no-install-recommends ca-certificates nginx openssl
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 update
+      apt-get -o Acquire::Retries=5 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 install -y --no-install-recommends ca-certificates nginx openssl
       rm -rf /var/lib/apt/lists/*
       ;;
     alpine)
-      apk add --no-cache ca-certificates nginx openssl
+      apk add --no-cache ca-certificates nginx openssl bash
       conf_dir="/etc/nginx/http.d"
       ;;
     rhel)
@@ -32,6 +32,14 @@ install_packages() {
 
 write_config() {
   groups_line=""
+  default_server_suffix=" default_server"
+
+  if [ "${family}" = "rhel" ]; then
+    # UBI/RHEL nginx images already ship a default server on port 80.
+    # Use ordinary listeners so our test config can coexist with the base config.
+    default_server_suffix=""
+  fi
+
   if [ "${variant}" = "pqc" ]; then
     groups_line="    ssl_conf_command Groups X25519MLKEM768:X25519:secp384r1;"
   fi
@@ -44,16 +52,16 @@ EOF
 
   cat > "${conf_dir}/pqc4free.conf" <<EOF
 server {
-    listen 80 default_server;
-    listen [::]:80 default_server;
+    listen 80${default_server_suffix};
+    listen [::]:80${default_server_suffix};
     server_name localhost;
 
     return 301 https://\$host\$request_uri;
 }
 
 server {
-    listen 443 ssl default_server;
-    listen [::]:443 ssl default_server;
+    listen 443 ssl${default_server_suffix};
+    listen [::]:443 ssl${default_server_suffix};
     server_name localhost;
 
     ssl_certificate     /etc/nginx/certs/server.crt;
